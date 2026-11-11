@@ -11,18 +11,23 @@ import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 
 private const val EXTENSION_CLASS = "Lapp/morphe/extension/claude/Larpude;"
 
+private const val SCREEN_TYPE = "Lcom/anthropic/claude/settings/SettingsAppScreen;"
+
 /*
- * All names below are obfuscated and belong to Claude 1.261106.19. Another version will most
- * likely need new names (see README, "Updating for a new Claude version").
+ * Claude is obfuscated and the names change on every release, so nothing below depends on an
+ * obfuscated name except the (readable) launcher activity and SettingsAppScreen. Everything else
+ * is found by what it does:
  *
- *  com.anthropic.claude.mainactivity.MainActivity  launcher activity
- *  settings.o.b(Ly2m;)List   builds the list of Settings rows (each row is an eea0)
- *  eea0(String id, String label, hn7 icon, String subtitle, vda0 action)   one Settings row
- *  jkm.d(Object,Object)      lambda that runs when a row is tapped; looks the row up by id
+ *  - rows builder: a one-parameter method returning a List that calls a method returning
+ *    SettingsAppScreen (it maps each Settings entry to its screen)
+ *  - row class:    the 5-argument constructor (String, String, icon, String, action) that
+ *    the rows builder calls for each row
+ *  - tap handler:  the method outside the row class that reads the row's action field
  */
 
 internal object MainActivityOnCreateFingerprint : Fingerprint(
@@ -33,17 +38,30 @@ internal object MainActivityOnCreateFingerprint : Fingerprint(
 )
 
 internal object SettingsRowsFingerprint : Fingerprint(
-    definingClass = "Lcom/anthropic/claude/settings/o;",
-    name = "b",
     returnType = "Ljava/util/List;",
-    parameters = listOf("Ly2m;"),
+    custom = { method, _ ->
+        method.parameterTypes.size == 1 &&
+            (method.implementation?.instructions?.any {
+                val ref = (it as? ReferenceInstruction)?.reference as? MethodReference
+                ref != null && ref.returnType == SCREEN_TYPE
+            } ?: false)
+    },
 )
 
+// Filled in by the patch after the rows builder is found; read lazily by the fingerprint below.
+private var rowType = ""
+private var actionType = ""
+
 internal object SettingsRowClickFingerprint : Fingerprint(
-    definingClass = "Ljkm;",
-    name = "d",
-    returnType = "Ljava/lang/Object;",
-    parameters = listOf("Ljava/lang/Object;", "Ljava/lang/Object;"),
+    custom = { method, classDef ->
+        rowType.isNotEmpty() &&
+            classDef.type != rowType &&
+            (method.implementation?.instructions?.any {
+                val ref = (it as? ReferenceInstruction)?.reference as? FieldReference
+                it.opcode == Opcode.IGET_OBJECT &&
+                    ref != null && ref.definingClass == rowType && ref.type == actionType
+            } ?: false)
+    },
 )
 
 @Suppress("unused")
@@ -70,6 +88,17 @@ val larpudePatch = bytecodePatch(
 
         // 2. Put the Larpude row first in the list of Settings rows.
         SettingsRowsFingerprint.method.apply {
+            val rowConstructor = instructions
+                .mapNotNull { (it as? ReferenceInstruction)?.reference as? MethodReference }
+                .firstOrNull {
+                    it.name == "<init>" && it.parameterTypes.size == 5 &&
+                        it.parameterTypes[0].toString() == "Ljava/lang/String;" &&
+                        it.parameterTypes[1].toString() == "Ljava/lang/String;" &&
+                        it.parameterTypes[3].toString() == "Ljava/lang/String;"
+                } ?: throw PatchException("Settings row constructor not found")
+            rowType = rowConstructor.definingClass
+            actionType = rowConstructor.parameterTypes[4].toString()
+
             val returnIndex = instructions.indexOfLast { it.opcode == Opcode.RETURN_OBJECT }
             if (returnIndex < 0) throw PatchException("No return in the Settings rows method")
             val register = (instructions[returnIndex] as OneRegisterInstruction).registerA
@@ -90,14 +119,14 @@ val larpudePatch = bytecodePatch(
             val actionIndex = instructions.indexOfFirst {
                 val ref = (it as? ReferenceInstruction)?.reference as? FieldReference
                 it.opcode == Opcode.IGET_OBJECT &&
-                    ref != null && ref.definingClass == "Leea0;" && ref.name == "e"
+                    ref != null && ref.definingClass == rowType && ref.type == actionType
             }
             if (actionIndex < 0) throw PatchException("Settings row action read not found")
 
             val castIndex = (actionIndex downTo 0).firstOrNull { index ->
                 val instruction = instructions[index]
                 val type = ((instruction as? ReferenceInstruction)?.reference as? TypeReference)?.type
-                instruction.opcode == Opcode.CHECK_CAST && type == "Leea0;"
+                instruction.opcode == Opcode.CHECK_CAST && type == rowType
             } ?: throw PatchException("Settings row cast not found")
 
             val register = (instructions[castIndex] as OneRegisterInstruction).registerA

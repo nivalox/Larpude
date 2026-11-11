@@ -12,7 +12,8 @@ Morphe patch for the Claude Android app (`com.anthropic.claude`). Goal: a **Larp
 
 ## What it does (v0.2.0)
 Adds a **Larpude** row at the top of Claude's Settings. Tapping it opens a screen that says Hello.
-Built for Claude **1.261106.19** (the hooks use that build's obfuscated class names).
+Written against Claude 1.261106.19 and 1.261109.19. The hooks find their targets by structure,
+not by obfuscated name, so most updates should keep working.
 
 Hooks (see `LarpudePatch.kt`): `MainActivity.onCreate`, `settings.o.b` (builds the row list, a row
 is `eea0`), `jkm.d` (row tap handler).

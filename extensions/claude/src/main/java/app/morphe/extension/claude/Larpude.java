@@ -8,6 +8,7 @@ import android.util.Log;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -19,9 +20,9 @@ import java.util.List;
  *  - the list of Settings rows       -> {@link #addRow}
  *  - the Settings row tap handler    -> {@link #interceptRow}
  *
- * A Settings row in the app is an obfuscated class with 5 fields:
- * a = id (String), b = label (String), c = icon, d = subtitle (String), e = action.
- * It is built through reflection because that class does not exist at compile time.
+ * A Settings row in the app is an obfuscated class built as (String id, String label, icon,
+ * String subtitle, action). Its names change per release, so it is handled through reflection by
+ * field/constructor TYPE, never by name.
  */
 public final class Larpude {
     private static final String TAG = "Larpude";
@@ -58,15 +59,19 @@ public final class Larpude {
         try {
             if (rows == null || rows.isEmpty()) return rows;
             Object first = rows.get(0);
-            if (ID.equals(read(first, "a"))) return rows; // already added
+            if (isLarpude(first)) return rows; // already added
 
             Class<?> rowClass = first.getClass();
-            Field iconField = field(rowClass, "c");
-            Field actionField = field(rowClass, "e");
-
-            Constructor<?> constructor = rowClass.getDeclaredConstructor(
-                    String.class, String.class, iconField.getType(), String.class, actionField.getType());
+            Constructor<?> constructor = null;
+            for (Constructor<?> c : rowClass.getDeclaredConstructors()) {
+                if (c.getParameterTypes().length == 5) { constructor = c; break; }
+            }
+            if (constructor == null) throw new NoSuchMethodException("5-arg row constructor");
             constructor.setAccessible(true);
+
+            Class<?>[] params = constructor.getParameterTypes();
+            Field iconField = fieldOfType(rowClass, params[2]);
+            Field actionField = fieldOfType(rowClass, params[4]);
 
             // Reuse the first row's icon and action object; the tap is intercepted anyway.
             Object row = constructor.newInstance(
@@ -89,7 +94,7 @@ public final class Larpude {
      */
     public static Object interceptRow(Object row) {
         try {
-            if (row != null && ID.equals(read(row, "a"))) {
+            if (isLarpude(row)) {
                 Activity activity = current.get();
                 if (activity != null) LarpudeScreen.show(activity);
                 return null;
@@ -100,13 +105,24 @@ public final class Larpude {
         return row;
     }
 
-    private static Field field(Class<?> c, String name) throws NoSuchFieldException {
-        Field f = c.getDeclaredField(name);
-        f.setAccessible(true);
-        return f;
+    /** True if any String field of the row equals our id (works whatever the field names are). */
+    private static boolean isLarpude(Object row) throws Exception {
+        if (row == null) return false;
+        for (Field f : row.getClass().getDeclaredFields()) {
+            if (Modifier.isStatic(f.getModifiers()) || f.getType() != String.class) continue;
+            f.setAccessible(true);
+            if (ID.equals(f.get(row))) return true;
+        }
+        return false;
     }
 
-    private static Object read(Object o, String fieldName) throws Exception {
-        return field(o.getClass(), fieldName).get(o);
+    private static Field fieldOfType(Class<?> c, Class<?> type) throws NoSuchFieldException {
+        for (Field f : c.getDeclaredFields()) {
+            if (!Modifier.isStatic(f.getModifiers()) && f.getType() == type) {
+                f.setAccessible(true);
+                return f;
+            }
+        }
+        throw new NoSuchFieldException(type.getName());
     }
 }
